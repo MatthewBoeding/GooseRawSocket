@@ -8,6 +8,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <linux/if_packet.h>
+#include <unistd.h>
+#include "raw_sock_goose.h"
 
 #define BUFSIZE  1500
 #define DEFAULT_IFACE "eth0"
@@ -38,11 +40,10 @@ uint8_t asciiToHex(uint8_t * hmac)
 		}
 		hmac[j] = ascii;
 	}
-	printf("%2x",(hmac[1] | (hmac[0] << 4)));
 	return (uint8_t)(hmac[1] | (hmac[0] << 4));
 }
 
-void parseMac(uint8_t * mac, struct ether_header *eth, 	struct sockaddr_ll socket_address)
+void parseMac(uint8_t * mac, struct ether_header *eth, 	struct sockaddr_ll socket_address, int dest)
 {
 	for(int i = 0; i < 6; i++)
 	{
@@ -50,28 +51,47 @@ void parseMac(uint8_t * mac, struct ether_header *eth, 	struct sockaddr_ll socke
 		hmac[0] = mac[i*2];
 		hmac[1] = mac[(i*2)+1];
 		uint8_t temp_mac = asciiToHex(hmac);
-		eth->ether_dhost[i] = temp_mac;
-		socket_address.sll_addr[i] = temp_mac;
+		if(dest > 0)
+		{
+			eth->ether_dhost[i] = temp_mac;
+			socket_address.sll_addr[i] = temp_mac;
+		}
+		else
+		{
+			eth->ether_shost[i] = temp_mac;
+		}
 	}
 }
 
 void main(int argc, uint8_t* argv[])
 {
-	//struct bpf_aux_data     aux_data;
-	int sock; 
+	int sock,iface_idx; 
 	int send_length = 0;	
 	char send_buffer[BUFSIZE];
 	struct ether_header *eth = (struct ether_header *) send_buffer;
 	struct sockaddr_ll socket_address;
 	struct ifreq iface_mac;
+	
+	//This is all added for vlan fun; 
+	
+	struct vlan_data aux_data;
+	struct iovec  iov;
+	struct msghdr msg;
+	struct cmsghdr *cmsg;
+	union {
+		struct cmsghdr cmsg;
+		char buf[CMSG_SPACE(sizeof(struct tpacket_auxdata))];
+	}cmsg_buf;
+	int on = 1;
 	char iface_name[IFNAMSIZ];
-	char DMAC[12] = {"010ccd010012"};
+	char DMAC[12] = {"010ccd010001"};
+	char SMAC[12] = {""};
 
-
+	
 	//Can we open a socket
  	sock = socket(AF_PACKET, SOCK_RAW, IPPROTO_RAW);
  	//This will be used for reception of VLAN packets
- 	//sock.setsockopt(SOL_PACKET, PACKET_AUXDATA);
+ 	setsockopt(sock, SOL_PACKET, PACKET_AUXDATA, &on, sizeof(on));
 	
 	if(argc > 1)
 	{
@@ -81,27 +101,35 @@ void main(int argc, uint8_t* argv[])
 	{
 		strcpy(iface_name, DEFAULT_IFACE);
 	}
-
 	memset(&iface_mac, 0, sizeof(struct ifreq));
 	strncpy(iface_mac.ifr_name, iface_name, IFNAMSIZ-1);
 		
 	memset(send_buffer, 0, BUFSIZE);
+	memset(&socket_address, 0, sizeof(struct sockaddr_ll));	
+	ioctl(sock, SIOCGIFHWADDR, &iface_mac) >= 0 ? : perror("SIOCGIFHWADDR");
+	ioctl(sock, SIOCGIFINDEX, &iface_mac) >= 0 ? : perror("SIOCGIFINDEX");
+	
+	socket_address.sll_family = AF_PACKET;
+	socket_address.sll_ifindex = iface_mac.ifr_ifindex;
+	
 
 	if(argc > 2)
 	{
 		strcpy(DMAC, argv[2]);
 	}
-		
-	parseMac(DMAC, eth, socket_address);
-
-	socket_address.sll_ifindex = iface_mac.ifr_ifindex;
-	socket_address.sll_halen = ETH_ALEN;
-	
-	for(int i = 0; i < 6; i++)
+	if(argc > 3)
 	{
-		eth->ether_shost[i] = ((uint8_t *)&iface_mac.ifr_hwaddr.sa_data)[i];
+		strcpy(SMAC, argv[3]);
+		parseMac(SMAC, eth, socket_address, 0);
+	}
+	else
+	{
+		for(int i = 0; i < 6; i++)
+		{
+			eth->ether_shost[i] = ((uint8_t *)&iface_mac.ifr_hwaddr.sa_data)[i];
+		}
 	}	
-	
+	parseMac(DMAC, eth, socket_address, 1);	
 	eth->ether_type = htons(0x88B8);
 	
 	
@@ -114,15 +142,9 @@ void main(int argc, uint8_t* argv[])
 	send_buffer[send_length++] = 0x00;
 	send_buffer[send_length++] = 0x00;
 
-	if (ioctl(sock, SIOCGIFINDEX, &iface_mac) < 0)
-	    perror("SIOCGIFINDEX");
-
-	if (ioctl(sock, SIOCGIFHWADDR, &iface_mac) < 0)
-	    perror("SIOCGIFHWADDR");
-
 	if (sendto(sock, send_buffer, send_length, 0, (struct sockaddr*)&socket_address, sizeof(struct sockaddr_ll)) == -1)
 	{
 		perror("send");
 	}
+	close(sock);
 }
-
