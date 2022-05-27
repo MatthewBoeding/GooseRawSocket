@@ -15,17 +15,17 @@
 
 int main(int argc, uint8_t ** argv[])
 {
+	char opt[IFNAMSIZ] = "eno1";
 	char message_data[BUFF_SIZE];
 	int on = 1;
-	int num_bytes;
-	
+	int num_bytes, sock_sniff;
 	sock_sniff = socket(AF_PACKET, SOCK_RAW, htons(0x88b8));
-	setsockopt(sock, SOL_PACKET, PACKET_AUXDATA, &on, sizeof(on));
+	setsockopt(sock_sniff, SOL_PACKET, SO_BINDTODEVICE, opt, IFNAMSIZ-1);
 
 	while(1)
 	{
 		printf("Attempting to sniff");
-		num_bytes = recvfrom(sock_sniff, message_data, BUFF_SIZE, NULL, NULL);
+		num_bytes = recvfrom(sock_sniff, message_data, BUFF_SIZE, 0, NULL, NULL);
 		printf("Goose Packet Received");
 	}
 	return 0;
