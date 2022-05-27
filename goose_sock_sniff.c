@@ -11,11 +11,11 @@
 #include <unistd.h>
 #include "raw_sock_goose.h"
 
-#define BUFF_SIZE  1550
+#define BUFF_SIZE  1500
 
 int main(int argc, uint8_t ** argv[])
 {
-	char opt[IFNAMSIZ] = "eno1";
+	char opt[IFNAMSIZ] = "eth0";
 	char message_data[BUFF_SIZE];
 	int on = 1;
 	int num_bytes, sock_sniff;
@@ -25,7 +25,7 @@ int main(int argc, uint8_t ** argv[])
 	while(1)
 	{
 		printf("Attempting to sniff");
-		num_bytes = recvfrom(sock_sniff, message_data, BUFF_SIZE, 0, NULL, NULL);
+		num_bytes = recvfrom(sock_sniff, message_data, BUFF_SIZE-1, 0, NULL, NULL);
 		printf("Goose Packet Received");
 	}
 	return 0;
