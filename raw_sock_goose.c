@@ -65,6 +65,67 @@ void parseMac(uint8_t * mac, struct ether_header *eth, 	struct sockaddr_ll socke
 	}
 }
 
+uint64_t goose_timestamp()
+{
+	uint64_t timestamp;
+	struct timespec time;
+	clock_gettime(CLOCK_REALTIME, &time);
+	unsigned int frac = 500000000;
+	unsigned int nsec = time.tv_nsec;
+	
+	timestamp = time(NULL) << 32;
+	
+	for(int i = 0; i < 24; i++)
+	{
+		if(time.tv_nsec > frac)
+		{
+			timestamp |= 1 << (i + 8);
+			time.tv_nsec = time.tv_nsec - frac;
+		}
+		frac = frac / 2; 
+	}
+	timestamp |= 0x18;
+	return timestamp;
+}
+
+int ber_encode(char tag, char * data, int length, char * buffer)
+{
+	int i = 0;
+	buffer[i++] = tag;
+	if(length > 128)
+	{
+		length > 256 ? buffer[i++] = 0x81 : buffer[i++] = 0x82;
+		buffer[i++] = (uint8_t)length >> 8;
+	}
+	buffer[i++] = (uint8_t) length;
+	for(int j = 0; j < length; j++)
+	{
+		buffer[i+j] = data[j];
+	}
+	return i;
+}
+
+void craft_packet(char * buffer)
+{
+	struct goose_apdu * apdu = (struct goose_apdu *) buffer;
+	int idx = sizeof(goose_apdu);
+	int pdu_length = 0;
+	char temp_buff[BUFF_SIZE];
+	char * current_index = &temp_buff;
+	apdu->appid = 0x0009;
+	apdu->reserved1 = 0x0000;
+	apdu->reserved2 = 0x0000;
+	apdu->pdu_tag = GOOSE_PDU_TAG;
+	
+	char goosefloat[] = {0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+	pdu_length += ber_encode(GOOSE_FLOAT_TAG, &goosefloat, 8, current_index);
+	current_index += pdu_length;
+	char boolean = 0x00;
+	pdu_length += ber_encode(GOOSE_BOOLEAN_TAG, &boolean, 1, current_index);
+	
+	apdu->length;
+}
+
 void main(int argc, uint8_t* argv[])
 {
 	int sock,sock2,iface_idx; 
