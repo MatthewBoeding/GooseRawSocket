@@ -6,10 +6,12 @@
 #include <netinet/in.h>
 #include <net/if.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <linux/if_packet.h>
 #include <unistd.h>
+#include <time.h>
 #include "raw_sock_goose.h"
 
 #define BUFSIZE  1500
@@ -67,19 +69,20 @@ void parseMac(uint8_t * mac, struct ether_header *eth, 	struct sockaddr_ll socke
 uint64_t goose_timestamp()
 {
 	uint64_t timestamp;
-	struct timespec time;
-	clock_gettime(CLOCK_REALTIME, &time);
+	char total_stamp[8];
+	struct timespec time_spec;
+	clock_gettime(CLOCK_REALTIME, &time_spec);
 	unsigned int frac = 500000000;
-	unsigned int nsec = time.tv_nsec;
+	unsigned int nsec = time_spec.tv_nsec;
 	
-	timestamp = time(NULL) << 32;
+	timestamp = (uint64_t)(time(NULL)) << 32;
 	
 	for(int i = 0; i < 24; i++)
 	{
-		if(time.tv_nsec > frac)
+		if(time_spec.tv_nsec > frac)
 		{
 			timestamp |= 1 << (i + 8);
-			time.tv_nsec = time.tv_nsec - frac;
+			time_spec.tv_nsec = time_spec.tv_nsec - frac;
 		}
 		frac = frac / 2; 
 	}
@@ -125,18 +128,21 @@ int ber_encode(char tag, char * data, uint16_t length, char * buffer)
 	i++;
 	for(int j = 0; j < length; j++)
 	{
-		buffer[i+j] = data[j];
+		buffer[j] = data[j];
 	}
 	i += length;
 	return i;
 }
-int goose_build_pduheader(char * data_buffer, char * current_index, struct goose_indices * data_indices)
+int goose_build_pduheader(char * data_buffer, char * packet_buffer, struct goose_indices * data_indices)
 {
+	int data_length;
+	char * current_index = packet_buffer;
 	uint16_t ber_length = 0;
 	uint16_t pdu_length = 0;
 	uint16_t idx = sizeof(struct goose_apdu);
-	uint16_t * curr_idx = (uint16_t *) &data_indices;
-	uint16_t * next_idx = curr_idx++;
+	uint16_t * curr_idx = (uint16_t *) data_indices;
+	uint16_t * next_idx = (uint16_t *) data_indices + 1;
+	int idx_len;
 
 	for(uint16_t i = GOCBREF_TAG; i <= NUMDATSETENTRIES_TAG; i++)
 	{
@@ -148,11 +154,10 @@ int goose_build_pduheader(char * data_buffer, char * current_index, struct goose
 			{
 				*next_idx++;
 			}
-			//how far between indexed entries
 			idx_len = *next_idx - *curr_idx;
 			//update the current index
 			*curr_idx++ = idx + pdu_length;
-			ber_length = ber_encode(GOCBREF_TAG, &data_buffer, idx_len, current_index);	
+			ber_length = ber_encode(i, data_buffer, idx_len, current_index);	
 			current_index += ber_length;
 			pdu_length += ber_length;
 			data_buffer += idx_len;
@@ -163,17 +168,18 @@ int goose_build_pduheader(char * data_buffer, char * current_index, struct goose
 			//generate our timestamp
 			uint64_t timestamp = goose_timestamp();
 			char * tstamp_ptr = (char *) &timestamp;
-			*curr_idx++ = idx + ber_length;
+			*curr_idx++ = idx + pdu_length;
 			ber_length = ber_encode(TIMESTAMP_TAG, tstamp_ptr, 4, current_index);
 			current_index += ber_length;			
 			pdu_length += ber_length;
 		}
 	}
+	data_indices->packet_length -= 2;
 	return pdu_length;
 }
 
 
-void goose_args(char * packet_buffer, char * data_buffer, struct goose_indices * data_indices)
+int goose_args(char * packet_buffer, char * data_buffer, struct goose_indices * data_indices)
 {
 	//static values
 	int pdu_length = 0;
@@ -182,15 +188,16 @@ void goose_args(char * packet_buffer, char * data_buffer, struct goose_indices *
 	uint16_t idx_len = 0;
 		
 	//dynamic values	
-	char * temp_buff = (char *)(malloc(BUF_SIZE)*sizeof(char));
+	char * temp_buff = (char *)(malloc(BUFSIZE*sizeof(char)));
 	char * current_index = temp_buff;
 	struct goose_apdu * apdu = (struct goose_apdu *) packet_buffer;
 	int idx = sizeof(struct goose_apdu);
-	int num_entries = data_buffer[(int)(data_indices.numdatasetentries_index)];
+	int num_entries = data_buffer[(int)(data_indices->numdatasetentries_index)];
+	uint16_t * curr_idx = (uint16_t *) &data_indices;
 
 	//data_buffer: |appid|gocbref|tat|dataset|goid|stnum|sqnum|test|confref|ndscom|#dataset|datatype,len,data|
 	//Build APDU header
-	apdu->appid = (uint16_t)((*data_buffer++<<8 | *(data_buffer++));
+	apdu->appid = (uint16_t)((*data_buffer++<<8 | *(data_buffer++)));
 	apdu->reserved1 = 0x0000;
 	apdu->reserved2 = 0x0000;
 	apdu->pdu_tag = GOOSE_PDU_TAG;
@@ -200,54 +207,63 @@ void goose_args(char * packet_buffer, char * data_buffer, struct goose_indices *
 	
 	//We don't know alldata (tag 0xAB) length yet, calculate that
 	int data_length = 0;
-	char * numdata_buff = (char *) malloc(256 * sizeof(char));
-	
+	char * numdata_buff = (char *) malloc(256);
+	current_index += pdu_length;
+	data_buffer += data_indices->packet_length;
 	//encode our data:
 	for(int i = 0; i < num_entries; i++)
 	{
-		char * data_loc = &(current_index) + (2*sizeof(char));
-		char * len_loc = &(current_index) + (1*sizeof(char));
-		ber_length = ber_encode(*current_index, &data_loc, &len_loc, numdata_buff); 
-		current_index += ber_length;			
+		char * data_loc = (data_buffer) + 2;
+		char * len_loc = (data_buffer) + 1;
+		ber_length = ber_encode(*data_buffer, data_loc, (uint16_t)*len_loc, numdata_buff); 
+		data_buffer += ber_length;
+		numdata_buff += ber_length;			
 		pdu_length += ber_length;
 		data_length += ber_length;
 	}
-	
+	numdata_buff -= data_length;
 	//Now we can finish the PDU header
-	*current_buffer++ = ALLDATA_TAG;
+	*current_index = ALLDATA_TAG;
+	current_index++;
 	pdu_length++;
 	if(data_length >= 256)
 	{		
-		*current_buffer++ = 0x82;
-		*current_buffer++ = (char)data_length >> 8;
+		*current_index = 0x82;
+		*current_index = (char)data_length >> 8;
 		pdu_length += 2;
+		current_index += 2;
 	}else if(pdu_length >= 128)
 	{
-			*current_buffer++ = 0x81;
+			*current_index = 0x81;
+			current_index++;
 			pdu_length++;
 	}
-	*current_buffer++ = (char)data_length;
+	*current_index = data_length;
+	current_index++;
 	pdu_length++;
 	
 	//But, the data needs to be put in our correct buffer
-	for(i = 0; i < data_length; i++)
+	for(int i = 0; i < data_length; i++)
 	{
-		*current_buffer++ = *numdata_buff++;
+		current_index[i] = numdata_buff[i];
 	}
 	
 	//So, we can calculate total pdu length
-	current_buffer = &packet_buffer + sizeof(goose_apdu);
+	current_index = packet_buffer + sizeof(struct goose_apdu)-1;
 	if(pdu_length >= 256)
 	{		
-		*current_buffer++ = 0x82;
-		*current_buffer++ = (char)pdu_length >> 8;
+		*current_index = 0x82;
+		*current_index = (char)pdu_length >> 8;
+		current_index += 2;
 		pdu_length_size += 2;
 	}else if(pdu_length >= 128)
 	{
-			*current_buffer++ = 0x81;
+			*current_index = 0x81;
 			pdu_length_size++;
+			current_index++;
 	}
-	*current_buffer++ = (char)pdu_length;
+	*current_index = pdu_length;
+	current_index++;
 	pdu_length_size++;
 	
 	//Reserved1&2 + pdu tag are added for apdu length
@@ -256,7 +272,7 @@ void goose_args(char * packet_buffer, char * data_buffer, struct goose_indices *
 	//The APDU header is complete. All that is left is to finish packet generation
 	for(int i=0; i < pdu_length; i++)
 	{
-		*current_buffer++ = *temp_buff++; 
+		current_index[i] = temp_buff[i]; 
 	}
 	
 	//And update packet indexes for future use
@@ -266,30 +282,30 @@ void goose_args(char * packet_buffer, char * data_buffer, struct goose_indices *
 		*curr_idx += pdu_length_size;
 		curr_idx++;
 	}
-	free(temp_buff);
-	return;
+
+	return apdu->length + 4;;
 }
 
-void default_goose_args(char * packet_buffer, struct goose_indices * data_indices)
+int default_goose_args(char * packet_buffer, struct goose_indices * data_indices)
 {
-	int idx;
+	uint16_t idx = 0;
 	char * data_buffer = (char *) malloc(BUFSIZE * sizeof(char));
 	char * encoding_buffer = data_buffer;
 	//data_buffer: |appid|gocbref|tat|dataset|goid|stnum|sqnum|test|confref|ndscom|#dataset|datatype,len,data|
-	char appid[2] = 0x1012;
+	char appid[2] = {0x12,0x10};
 	strcpy(encoding_buffer, appid);
 	encoding_buffer += 2;	
 	idx += 2;
 	
 	char gocbRef[22] = "HPLSCFG/LLN0$GO$GPub01";
-	data_indices.gocbref_index = idx;
+	data_indices->gocbref_index = idx;
 	strcpy(encoding_buffer, gocbRef);
 	encoding_buffer += 22;	
 	idx += 22;
 	
-	char tat[2] = 0x07d0;
+	char tat[2] = {0xd0, 0x07};
 	data_indices->timeallowed_index = idx;
-	strcpy(encoding_buffer, tat);
+	memcpy(encoding_buffer, tat,2);
 	encoding_buffer += 2;	
 	idx += 2;
 	
@@ -307,95 +323,96 @@ void default_goose_args(char * packet_buffer, struct goose_indices * data_indice
 	
 	char zero = 0x00;
 	data_indices->state_index = idx;
-	*encoding_buffer++ = zero;
+	*encoding_buffer = zero;
+	encoding_buffer++;
 	idx++;
 	
 	data_indices->sequence_index = idx;
-	*encoding_buffer++ = zero;
+	*encoding_buffer = zero;
+	encoding_buffer++;
 	idx++;
 	
 	data_indices->test_index = idx;
-	*encoding_buffer++ = zero;
+	*encoding_buffer = zero;
+	encoding_buffer++;
 	idx++;
 	
 	data_indices->confrev_index = idx;
-	*encoding_buffer++ = 0x01;
+	*encoding_buffer = 0x01;
+	encoding_buffer++;
 	idx++;
 	
+	data_indices->ndscom_index = idx;
+	*encoding_buffer = 0x01;
+	encoding_buffer++;
+	idx++;
+
 	data_indices->numdatasetentries_index = idx;
 	char numDat = 0x03;
-	*encoding_buffer++ = numDat;
+	*encoding_buffer = numDat;
+	encoding_buffer++;
 	
+	idx++;
+	data_indices->packet_length = idx;
 	char data[14] = {0x87,0x05, 0x80, 0x00, 0x00, 0x00, 0x00, 0x83, 0x01, 0x00, 0x84, 0x02, 0x06, 0x40};
-	strcpy(encoding_buffer, data);
+	memcpy(encoding_buffer, data, 14);
 	encoding_buffer += 14;
 	
-	goose_args(packet_buffer, data_buffer, data_indices);
+	int packet_len = goose_args(packet_buffer, data_buffer, data_indices);
 	free(data_buffer);
+	return packet_len;
 }
 
-int connect_socket()
-{
-	//Open Socket
- 	sock = socket(AF_PACKET, SOCK_RAW, IPPROTO_RAW);
-	//Make non-blocking calls
-	setsockopt(sock, SOL_SOCKET, SO_DONTROUTE, (void *)&on, len) >= 0? : perror("Socket Routing"); 
-	//interface association
-	strcpy(iface_name, DEFAULT_IFACE);
-	memset(&iface_mac, 0, sizeof(struct ifreq));
-	strncpy(iface_mac.ifr_name, iface_name, IFNAMSIZ-1);
-		
-	memset(send_buffer, 0, BUFSIZE);
-	memset(&socket_address, 0, sizeof(struct sockaddr_ll));	
-	ioctl(sock, SIOCGIFHWADDR, &iface_mac) >= 0 ? : perror("SIOCGIFHWADDR");
-	ioctl(sock, SIOCGIFINDEX, &iface_mac) >= 0 ? : perror("SIOCGIFINDEX");
-	
-	socket_address.sll_family = AF_PACKET;
-	socket_address.sll_ifindex = iface_mac.ifr_ifindex;
-}
+
+
+
 
 void main(int argc, uint8_t* argv[])
 {
 	int sock,iface_idx, line_size; 
-	int send_length = 0;	
+	int send_length = 0;
+	int packet_len = 0;	
 	int indexes[20];
 	int count = 0;
 	char send_buffer[BUFSIZE];
 	struct ether_header *eth = (struct ether_header *) send_buffer;
 	struct sockaddr_ll socket_address;
 	struct ifreq iface_mac;
+	char * iface_name = (char *) malloc(IFNAMSIZ);
 
 	int on = 1;
-	char iface_name[IFNAMSIZ];
 	char DMAC[12] = {"010ccd010001"};
 	char SMAC[12] = {0x00};
 	unsigned int len = sizeof(on);
 	FILE *params;
-	char goose_buffer[BUFSIZE];
-	
+	struct goose_indices * data_indices = (struct goose_indices *)malloc(sizeof(struct goose_indices));
+	char * goose_buffer = (char *) malloc(BUFSIZE);	
+
 	if(argc < 2)
 	{
 		printf("No parameters passed...using defaults");
-		default_goose_args(&goose_buffer);
+		packet_len = default_goose_args(goose_buffer, data_indices);
 	}
 	else
 	{
-		params = fopen(argv[1], 'r'); 
-		char * file_buffer = (char *)malloc(3000 * sizeof(char)));
+		params = fopen(argv[1], "r"); 
+		int buffer_size = 3000;
+		char * file_buffer = (char *)malloc(buffer_size * sizeof(char));
 
-		line_size = getline(&file_buffer, 3000, params);
+		line_size = getline(&file_buffer, &buffer_size, params);
 		char * current_file = file_buffer + line_size;
 		indexes[count++] = line_size;
 		while(line_size >= 0)
 		{
-			line_size = getline(&current_file, 3000, params);
+			line_size = getline(&current_file, &buffer_size, params);
 			indexes[count] = line_size + indexes[count-1];
-			indexes[count] <= 2500 ? : line_size = -1;
+			if(indexes[count] > 2500)
+				line_size = -1;
 			count++;
 			current_file += line_size;
 		}
 		current_file = file_buffer;
-		parse_goose_args(&current_file, &indexes, count);
+		//parse_goose_args(&current_file, &indexes, count);
 		free(file_buffer);
 	}
 
@@ -407,26 +424,47 @@ void main(int argc, uint8_t* argv[])
 		}
 	}
 
-	sock = connect_socket();
+		//Open Socket
+ 	sock = socket(AF_PACKET, SOCK_RAW, IPPROTO_RAW);
+	sock >= 0 ? : perror("Socket Creation");
+	//Make non-blocking calls
+	setsockopt(sock, SOL_SOCKET, SO_DONTROUTE, (void *)&on, len) >= 0? : perror("Socket Routing"); 
+	//interface association
+	strcpy(iface_name, DEFAULT_IFACE);
 
+	memset(&iface_mac, 0, sizeof(struct ifreq));
+	strncpy(iface_mac.ifr_name, iface_name, IFNAMSIZ-1);
+		
+
+	memset(&socket_address, 0, sizeof(struct sockaddr_ll));	
+	ioctl(sock, SIOCGIFHWADDR, &iface_mac) >= 0 ? : perror("SIOCGIFHWADDR");
+	ioctl(sock, SIOCGIFINDEX, &iface_mac) >= 0 ? : perror("SIOCGIFINDEX");
+	
+	socket_address.sll_family = AF_PACKET;
+	socket_address.sll_ifindex = iface_mac.ifr_ifindex;
+	memset(send_buffer, 0, BUFSIZE);
 	parseMac(DMAC, eth, socket_address, 1);	
 	eth->ether_type = htons(0x88B8);
 	
 	int eth_hdr_len = sizeof(struct ether_header);
 	send_length += eth_hdr_len;
 
-	for(int g = 0; g < sizeof(goose_buffer); g++)
+
+	char temp = goose_buffer[2];
+	goose_buffer[2] = goose_buffer[3];
+	goose_buffer[3] = temp;
+	for(int g = 0; g < packet_len; g++)
 	{ 
 		send_buffer[eth_hdr_len+g] = goose_buffer[g];
 	}
-	send_length += sizeof(goose_buffer);
-	while(1)
+	send_length = packet_len + eth_hdr_len;
+	int i = 0;
+	while(i < 10)
 	{
-		for(int i = 0; i < 10; i++)
-		{
-			sendto(sock, send_buffer, send_length, MSG_DONTWAIT, (struct sockaddr*)&socket_address, sizeof(struct sockaddr_ll));// >= 0 ? : perror("sending"); 
-		}
+		i++;
+		sendto(sock, send_buffer, send_length, MSG_DONTWAIT, (struct sockaddr*)&socket_address, sizeof(struct sockaddr_ll));// >= 0 ? : perror("sending"); 
 	}
 	close(sock);
+	free(NULL);
 }
 
