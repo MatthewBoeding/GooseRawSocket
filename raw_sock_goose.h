@@ -12,6 +12,7 @@
 #define CONFREV_TAG                 0x88 
 #define NDSCOM_TAG                  0x89 
 #define NUMDATSETENTRIES_TAG        0x8A 
+#define ALLDATA_TAG		    0xAB
 
  
 #define GOOSE_BOOLEAN_TAG           0x83 
@@ -30,6 +31,21 @@
 #define GOOSE_STRUCT_TAG            0x2A 
 
 
+struct goose_indices{
+	uint16_t gocbref_index;
+	uint16_t timeallowed_index;
+	uint16_t dataset_index;
+	uint16_t goid_index;
+	uint16_t timestamp_index;
+	uint16_t state_index;
+	uint16_t sequence_index;
+	uint16_t test_index;
+	uint16_t confrev_index;
+	uint16_t ndscom_index;
+	uint16_t numdatasetentries_index;
+	uint16_t packet_length;
+};
+
 struct goose_apdu{
 	uint16_t appid;
 	uint16_t length;
@@ -38,19 +54,12 @@ struct goose_apdu{
 	uint8_t pdu_tag;
 };
 
-struct goose_indices{
-	uint16_t gocbref_index;
-	uint16_t timeallowedtolive_index;
-	uint16_t dataset_index;
-	uint16_t goid_index;
-	uint16_t timestamp_index;
-	uint16_t stnum_index;
-	uint16_t sqnum_index;
-	uint16_t test_index;
-	uint16_t confrev_index;
-	uint16_t ndscom_index;
-	uint16_t numdatasetentries_index;
+struct goose_packet{
+		struct goose_indices * indices;
+		char * packet_location;
+		int packet_length;
 };
+
 
 struct vlan_data{
 	uint16_t vlan_tag;
