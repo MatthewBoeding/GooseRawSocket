@@ -38,6 +38,20 @@ struct goose_apdu{
 	uint8_t pdu_tag;
 };
 
+struct goose_indices{
+	uint16_t gocbref_index;
+	uint16_t timeallowedtolive_index;
+	uint16_t dataset_index;
+	uint16_t goid_index;
+	uint16_t timestamp_index;
+	uint16_t stnum_index;
+	uint16_t sqnum_index;
+	uint16_t test_index;
+	uint16_t confrev_index;
+	uint16_t ndscom_index;
+	uint16_t numdatasetentries_index;
+};
+
 struct vlan_data{
 	uint16_t vlan_tag;
 	uint16_t vlan_tag_present;
